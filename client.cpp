@@ -1,23 +1,119 @@
 // client.cpp
 #include <iostream>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <pthread.h>
 #include <sstream>
 #include <vector>
 #include <map>
 #include <string>
 #include <fstream>
-#include <thread>
 #include <algorithm> // For std::min
 #include <cstring>   // For strlen, strcpy
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
+#ifndef inet_ntop
+#define inet_ntop InetNtopA
+#endif
+#ifndef inet_pton
+#define inet_pton InetPtonA
+#endif
+
+#if defined(__MINGW32__) || defined(__MINGW64__)
+#include <pthread.h>
+#elif defined(_MSC_VER)
+#include <process.h>
+using pthread_t = HANDLE;
+using pthread_mutex_t = CRITICAL_SECTION;
+
+struct ThreadStartData {
+    void* (*start_routine)(void*);
+    void* arg;
+};
+
+inline DWORD WINAPI threadTrampoline(LPVOID parameter) {
+    ThreadStartData* data = static_cast<ThreadStartData*>(parameter);
+    data->start_routine(data->arg);
+    delete data;
+    return 0;
+}
+
+inline int pthread_create(pthread_t* thread, void*, void* (*start_routine)(void*), void* arg) {
+    ThreadStartData* data = new ThreadStartData{start_routine, arg};
+    *thread = CreateThread(nullptr, 0, threadTrampoline, data, 0, nullptr);
+    return (*thread != nullptr) ? 0 : -1;
+}
+
+inline int pthread_detach(pthread_t thread) {
+    if (thread) {
+        CloseHandle(thread);
+    }
+    return 0;
+}
+
+inline int pthread_join(pthread_t thread, void**) {
+    if (thread) {
+        WaitForSingleObject(thread, INFINITE);
+        CloseHandle(thread);
+    }
+    return 0;
+}
+
+inline int pthread_mutex_init(pthread_mutex_t* mutex, void*) {
+    InitializeCriticalSection(mutex);
+    return 0;
+}
+
+inline int pthread_mutex_destroy(pthread_mutex_t* mutex) {
+    DeleteCriticalSection(mutex);
+    return 0;
+}
+
+inline int pthread_mutex_lock(pthread_mutex_t* mutex) {
+    EnterCriticalSection(mutex);
+    return 0;
+}
+
+inline int pthread_mutex_unlock(pthread_mutex_t* mutex) {
+    LeaveCriticalSection(mutex);
+    return 0;
+}
+#else
+#error "Use MinGW-w64 (POSIX threads) or MSVC with this file's MSVC pthread stubs."
+#endif
+
+typedef SOCKET sockfd_t;
+
+inline int socketClose(sockfd_t sock) {
+    return closesocket(sock);
+}
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <pthread.h>
+typedef int SOCKET;
+typedef int sockfd_t;
+#ifndef INVALID_SOCKET
+#define INVALID_SOCKET (-1)
+#endif
+#ifndef SOCKET_ERROR
+#define SOCKET_ERROR (-1)
+#endif
+inline int socketClose(sockfd_t sock) {
+    return close(sock);
+}
+#endif
 
 #define BUFLEN 1024
 #define FILE_CHUNK_SIZE 8192
 
-int trackerSock;
+SOCKET trackerSock;
 bool loggedIn = false;
 std::string currentUser;
 int clientPort = 9000; // Default port for listening to peer connections
@@ -49,8 +145,8 @@ void displayHelp();
 void showDownloads();
 std::string sendToTrackerAndGetResponse(const std::string &message);
 void sendToTracker(const std::string &message);
-bool sendFile(const std::string& filePath, int peerSock);
-bool receiveFile(const std::string& savePath, int peerSock, const std::string& filename, const std::string& groupId);
+bool sendFile(const std::string& filePath, SOCKET peerSock);
+bool receiveFile(const std::string& savePath, SOCKET peerSock, const std::string& filename, const std::string& groupId);
 void downloadFile(const std::string& groupId, const std::string& filename, const std::string& savePath);
 void* handleClient(void* arg);
 void* peerServerFunc(void* arg);
@@ -122,7 +218,7 @@ void sendToTracker(const std::string &message) {
 }
 
 // File transfer functions
-bool sendFile(const std::string& filePath, int peerSock) {
+bool sendFile(const std::string& filePath, SOCKET peerSock) {
     std::ifstream file(filePath, std::ios::binary);
     if (!file.is_open()) {
         std::cerr << "Error opening file: " << filePath << std::endl;
@@ -181,7 +277,7 @@ bool sendFile(const std::string& filePath, int peerSock) {
     return true;
 }
 
-bool receiveFile(const std::string& savePath, int peerSock, const std::string& filename, const std::string& groupId) {
+bool receiveFile(const std::string& savePath, SOCKET peerSock, const std::string& filename, const std::string& groupId) {
     try {
         // Receive file size
         char sizeBuffer[BUFLEN];
@@ -302,10 +398,10 @@ void downloadFile(const std::string& groupId, const std::string& filename, const
     std::cout << "Connecting to peer: " << peerUsername << " at " << peerIp << ":" << peerPort << std::endl;
     
     // Connect to peer
-    int peerSock;
+    SOCKET peerSock;
     struct sockaddr_in peerAddr;
     
-    if ((peerSock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    if ((peerSock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
         std::cerr << "Socket creation error" << std::endl;
         return;
     }
@@ -314,16 +410,17 @@ void downloadFile(const std::string& groupId, const std::string& filename, const
     peerAddr.sin_port = htons(peerPort);
     
     // Convert IPv4 address from text to binary
-    if (inet_pton(AF_INET, peerIp.c_str(), &peerAddr.sin_addr) <= 0) {
+    peerAddr.sin_addr.s_addr = inet_addr(peerIp.c_str());
+    if (peerAddr.sin_addr.s_addr == INADDR_NONE) {
         std::cerr << "Invalid address / Address not supported" << std::endl;
-        close(peerSock);
+        socketClose(peerSock);
         return;
     }
     
     // Connect to peer
-    if (connect(peerSock, (struct sockaddr *)&peerAddr, sizeof(peerAddr)) < 0) {
+    if (connect(peerSock, (struct sockaddr *)&peerAddr, sizeof(peerAddr)) == SOCKET_ERROR) {
         std::cerr << "Connection Failed" << std::endl;
-        close(peerSock);
+        socketClose(peerSock);
         return;
     }
     
@@ -347,7 +444,7 @@ void downloadFile(const std::string& groupId, const std::string& filename, const
     bool success = receiveFile(savePath, peerSock, filename, groupId);
     
     // Close connection
-    close(peerSock);
+    socketClose(peerSock);
     
     if (!success) {
         std::cerr << "Download failed" << std::endl;
@@ -355,8 +452,8 @@ void downloadFile(const std::string& groupId, const std::string& filename, const
 }
 
 void* handleClient(void* arg) {
-    int* sock_ptr = (int*)arg;
-    int sock = *sock_ptr;
+    SOCKET* sock_ptr = (SOCKET*)arg;
+    SOCKET sock = *sock_ptr;
     delete sock_ptr;
     
     char buffer[BUFLEN];
@@ -387,25 +484,29 @@ void* handleClient(void* arg) {
         }
     }
     
-    close(sock);
+        socketClose(sock);
     return NULL;
 }
 
 void* peerServerFunc(void* arg) {
     // Create socket
-    int serverSock, clientSock;
+    SOCKET serverSock, clientSock;
     struct sockaddr_in server, client;
     int opt = 1;
+#ifdef _WIN32
+    int addrlen = sizeof(client);
+#else
     socklen_t addrlen = sizeof(client);
+#endif
     
     // Creating socket file descriptor
-    if ((serverSock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    if ((serverSock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
         std::cerr << "Socket creation error" << std::endl;
         return NULL;
     }
     
     // Set socket options
-    if (setsockopt(serverSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
+    if (setsockopt(serverSock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt)) == SOCKET_ERROR) {
         std::cerr << "setsockopt error" << std::endl;
         return NULL;
     }
@@ -416,13 +517,13 @@ void* peerServerFunc(void* arg) {
     server.sin_port = htons(clientPort);
     
     // Bind socket
-    if (bind(serverSock, (struct sockaddr *)&server, sizeof(server)) < 0) {
+    if (bind(serverSock, (struct sockaddr *)&server, sizeof(server)) == SOCKET_ERROR) {
         std::cerr << "Bind failed" << std::endl;
         return NULL;
     }
     
     // Listen for connections
-    if (listen(serverSock, 5) < 0) {
+    if (listen(serverSock, 5) == SOCKET_ERROR) {
         std::cerr << "Listen error" << std::endl;
         return NULL;
     }
@@ -433,7 +534,7 @@ void* peerServerFunc(void* arg) {
     // Accept connections and handle them
     while (serverRunning) {
         clientSock = accept(serverSock, (struct sockaddr *)&client, &addrlen);
-        if (clientSock < 0) {
+        if (clientSock == INVALID_SOCKET) {
             if (serverRunning) { // Only log error if server is still meant to be running
                 std::cerr << "Accept failed" << std::endl;
             }
@@ -442,19 +543,19 @@ void* peerServerFunc(void* arg) {
         
         // Create thread to handle client
         pthread_t clientThread;
-        int* sock_ptr = new int(clientSock);
+        SOCKET* sock_ptr = new SOCKET(clientSock);
         
         if (pthread_create(&clientThread, NULL, handleClient, sock_ptr) != 0) {
             std::cerr << "Error creating thread" << std::endl;
             delete sock_ptr;
-            close(clientSock);
+                socketClose(clientSock);
         } else {
             // Detach thread
             pthread_detach(clientThread);
         }
     }
     
-    close(serverSock);
+        socketClose(serverSock);
     return NULL;
 }
 
@@ -482,17 +583,17 @@ void stopPeerServer() {
     serverRunning = false;
     
     // Create temporary socket to unblock accept
-    int tempSock = socket(AF_INET, SOCK_STREAM, 0);
+    SOCKET tempSock = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in server;
     server.sin_family = AF_INET;
     server.sin_port = htons(clientPort);
     
     // Convert localhost to binary
-    inet_pton(AF_INET, "127.0.0.1", &server.sin_addr);
+    server.sin_addr.s_addr = inet_addr("127.0.0.1");
     
     // Connect to server to unblock accept
     connect(tempSock, (struct sockaddr*)&server, sizeof(server));
-    close(tempSock);
+    socketClose(tempSock);
     
     // Wait for server thread to complete
     pthread_join(serverThreadId, NULL);
@@ -619,6 +720,14 @@ int main(int argc, char *argv[]) {
         std::cerr << "Usage: " << argv[0] << " <tracker_ip:port>" << std::endl;
         return 1;
     }
+
+#ifdef _WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed" << std::endl;
+        return 1;
+    }
+#endif
     
     std::string ip_port(argv[1]);
     size_t pos = ip_port.find(":");
@@ -637,7 +746,7 @@ int main(int argc, char *argv[]) {
     }
     
     // Create socket
-    if ((trackerSock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    if ((trackerSock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
         std::cerr << "Socket creation error" << std::endl;
         return 1;
     }
@@ -647,13 +756,14 @@ int main(int argc, char *argv[]) {
     serv_addr.sin_port = htons(tracker_port);
     
     // Convert IPv4 address from text to binary
-    if (inet_pton(AF_INET, tracker_ip.c_str(), &serv_addr.sin_addr) <= 0) {
+    serv_addr.sin_addr.s_addr = inet_addr(tracker_ip.c_str());
+    if (serv_addr.sin_addr.s_addr == INADDR_NONE) {
         std::cerr << "Invalid address / Address not supported" << std::endl;
         return 1;
     }
     
     // Connect to tracker
-    if (connect(trackerSock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+    if (connect(trackerSock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) == SOCKET_ERROR) {
         std::cerr << "Connection Failed" << std::endl;
         return 1;
     }
@@ -671,7 +781,11 @@ int main(int argc, char *argv[]) {
     
     // Cleanup
     stopPeerServer();
-    close(trackerSock);
+    socketClose(trackerSock);
+
+#ifdef _WIN32
+    WSACleanup();
+#endif
     
     return 0;
 }

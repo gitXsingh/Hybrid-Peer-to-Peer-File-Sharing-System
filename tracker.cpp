@@ -1,16 +1,105 @@
 // tracker.cpp
 #include <iostream>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <pthread.h>
 #include <vector>
 #include <map>
 #include <sstream>
 #include <string>
 #include <fstream>
 #include <set>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
+#ifndef inet_ntop
+#define inet_ntop InetNtopA
+#endif
+#ifndef inet_pton
+#define inet_pton InetPtonA
+#endif
+
+#if defined(__MINGW32__) || defined(__MINGW64__)
+#include <pthread.h>
+#elif defined(_MSC_VER)
+#include <process.h>
+using pthread_t = HANDLE;
+using pthread_mutex_t = CRITICAL_SECTION;
+
+struct ThreadStartData {
+    void* (*start_routine)(void*);
+    void* arg;
+};
+
+inline DWORD WINAPI threadTrampoline(LPVOID parameter) {
+    ThreadStartData* data = static_cast<ThreadStartData*>(parameter);
+    data->start_routine(data->arg);
+    delete data;
+    return 0;
+}
+
+inline int pthread_create(pthread_t* thread, void*, void* (*start_routine)(void*), void* arg) {
+    ThreadStartData* data = new ThreadStartData{start_routine, arg};
+    *thread = CreateThread(nullptr, 0, threadTrampoline, data, 0, nullptr);
+    return (*thread != nullptr) ? 0 : -1;
+}
+
+inline int pthread_detach(pthread_t thread) {
+    if (thread) {
+        CloseHandle(thread);
+    }
+    return 0;
+}
+
+inline int pthread_mutex_init(pthread_mutex_t* mutex, void*) {
+    InitializeCriticalSection(mutex);
+    return 0;
+}
+
+inline int pthread_mutex_destroy(pthread_mutex_t* mutex) {
+    DeleteCriticalSection(mutex);
+    return 0;
+}
+
+inline int pthread_mutex_lock(pthread_mutex_t* mutex) {
+    EnterCriticalSection(mutex);
+    return 0;
+}
+
+inline int pthread_mutex_unlock(pthread_mutex_t* mutex) {
+    LeaveCriticalSection(mutex);
+    return 0;
+}
+#else
+#error "Use MinGW-w64 (POSIX threads) or MSVC with this file's MSVC pthread stubs."
+#endif
+
+typedef SOCKET sockfd_t;
+
+inline int socketClose(sockfd_t sock) {
+    return closesocket(sock);
+}
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <pthread.h>
+typedef int SOCKET;
+typedef int sockfd_t;
+#ifndef INVALID_SOCKET
+#define INVALID_SOCKET (-1)
+#endif
+#ifndef SOCKET_ERROR
+#define SOCKET_ERROR (-1)
+#endif
+inline int socketClose(sockfd_t sock) {
+    return close(sock);
+}
+#endif
 using namespace std;
 
 #define PORT 8001  // Changed port to avoid conflicts
@@ -44,11 +133,11 @@ struct PeerInfo {
 // Store users and their files
 map<string, string> users; // username -> password
 map<string, vector<FileInfo>> userFiles; // username -> files
-map<int, string> loggedInUsers; // socket -> username
+map<sockfd_t, string> loggedInUsers; // socket -> username
 map<string, Group> groups; // groupId -> Group
 map<string, map<string, bool>> downloads; // username -> {filename -> isComplete}
 map<string, PeerInfo> peerInfo; // username -> PeerInfo
-map<int, string> socketToIp; // socket -> IP address
+map<sockfd_t, string> socketToIp; // socket -> IP address
 
 // Parse command string into command and arguments
 void parseCommand(const string& input, string& command, vector<string>& args) {
@@ -61,7 +150,7 @@ void parseCommand(const string& input, string& command, vector<string>& args) {
 }
 
 // Send response to client
-void sendResponse(int clientSock, const string& response) {
+void sendResponse(sockfd_t clientSock, const string& response) {
     send(clientSock, response.c_str(), response.length(), 0);
 }
 
@@ -103,22 +192,24 @@ string getFilePath(const string& username, const string& filename, const string&
 
 // Structure to pass data to thread
 struct ThreadData {
-    int sock;
+    SOCKET sock;
 };
 
 // Thread callback function
 void* clientHandlerThread(void* arg) {
     ThreadData* data = static_cast<ThreadData*>(arg);
-    int clientSock = data->sock;
+    SOCKET clientSock = data->sock;
     delete data; // Free the allocated memory
     
     // Get client IP address
     sockaddr_in clientAddr;
+#ifdef _WIN32
+    int addrLen = sizeof(clientAddr);
+#else
     socklen_t addrLen = sizeof(clientAddr);
+#endif
     getpeername(clientSock, (sockaddr*)&clientAddr, &addrLen);
-    char ipBuffer[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(clientAddr.sin_addr), ipBuffer, INET_ADDRSTRLEN);
-    string clientIp(ipBuffer);
+    string clientIp(inet_ntoa(clientAddr.sin_addr));
     socketToIp[clientSock] = clientIp;
     
     char buffer[BUFLEN];
@@ -626,7 +717,7 @@ void* clientHandlerThread(void* arg) {
     }
 
     std::cout << "Client disconnected.\n";
-    close(clientSock);
+    socketClose(clientSock);
     return NULL;
 }
 
@@ -636,19 +727,27 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+#ifdef _WIN32
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed" << std::endl;
+        return 1;
+    }
+#endif
+
     // Initialize socket
-    int serverSock;
+    SOCKET serverSock;
     struct sockaddr_in server, client;
     
     // Create socket
-    if ((serverSock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    if ((serverSock = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
         cerr << "Error creating socket" << endl;
         return 1;
     }
     
     // Set socket options to reuse address
     int opt = 1;
-    if (setsockopt(serverSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+    if (setsockopt(serverSock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt)) == SOCKET_ERROR) {
         cerr << "Error setting socket options" << endl;
         return 1;
     }
@@ -659,13 +758,13 @@ int main(int argc, char *argv[]) {
     server.sin_port = htons(PORT);
     
     // Bind
-    if (bind(serverSock, (struct sockaddr *)&server, sizeof(server)) < 0) {
+    if (bind(serverSock, (struct sockaddr *)&server, sizeof(server)) == SOCKET_ERROR) {
         cerr << "Bind failed" << endl;
         return 1;
     }
     
     // Listen
-    if (listen(serverSock, 5) < 0) {
+    if (listen(serverSock, 5) == SOCKET_ERROR) {
         cerr << "Listen failed" << endl;
         return 1;
     }
@@ -673,10 +772,14 @@ int main(int argc, char *argv[]) {
     cout << "Tracker started on port " << PORT << endl;
     
     // Accept connections
+#ifdef _WIN32
+    int clientLen = sizeof(client);
+#else
     socklen_t clientLen = sizeof(client);
-    int clientSock;
+#endif
+    SOCKET clientSock;
     
-    while ((clientSock = accept(serverSock, (struct sockaddr *)&client, &clientLen)) > 0) {
+    while ((clientSock = accept(serverSock, (struct sockaddr *)&client, &clientLen)) != INVALID_SOCKET) {
         cout << "Connection accepted" << endl;
         
         // Create thread to handle client
@@ -686,13 +789,16 @@ int main(int argc, char *argv[]) {
         if (pthread_create(&threadId, NULL, clientHandlerThread, data) != 0) {
             cerr << "Error creating thread" << endl;
             delete data;
-            close(clientSock);
+            socketClose(clientSock);
         } else {
             // Detach thread to automatically release resources
             pthread_detach(threadId);
         }
     }
     
-    close(serverSock);
+    socketClose(serverSock);
+#ifdef _WIN32
+    WSACleanup();
+#endif
     return 0;
 }

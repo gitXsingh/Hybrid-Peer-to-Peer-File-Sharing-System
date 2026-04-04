@@ -1,0 +1,9 @@
+# Binaries
+*.exe
+tracker
+client
+*.o
+*.obj
+
+# Go
+vendor/
