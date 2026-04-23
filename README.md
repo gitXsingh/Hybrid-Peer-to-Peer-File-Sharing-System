@@ -16,6 +16,7 @@ Key features include:
 
 - [Overview](#overview)
 - [Architecture](#architecture)
+- [Architecture Diagrams](#architecture-diagrams)
 - [Components](#components)
 - [Getting Started](#getting-started)
 - [Available Commands](#available-commands)
@@ -34,20 +35,83 @@ The system is built for Windows using Winsock API and supports multi-threaded op
 
 The system follows a hybrid architecture with centralized metadata management and distributed file transfers.
 
+```mermaid
+flowchart LR
+subgraph CL["Client Layer"]
+  U["User (CLI)"]
+  CA["Client Peer A"]
+  CB["Client Peer B (Owner)"]
+end
+
+subgraph SL["Server Layer"]
+  T["Tracker Server\n(Auth + Groups + Metadata + Discovery)"]
+end
+
+subgraph DL["Data Layer"]
+  M["In-memory Store\nusers/groups/files/peerInfo/downloads"]
+end
+
+U -->|Input command| CA
+CA -->|TCP metadata request| T
+T -->|Metadata response| CA
+T -->|Read/Write state| M
+CA -->|Direct TCP download request| CB
+CB -->|File stream (8KB chunks)| CA
+CA -->|Progress + result| U
+CA -->|download_complete filename groupId| T
 ```
-┌──────────────────┐                 ┌───────────────┐
-│                  │                 │               │
-│  Tracker Server  │◄────Register────┤  Client Peer  │
-│                  │─────Status─────►│               │
-└────────┬─────────┘                 └───────┬───────┘
-         │                                   │
-         │                                   │
-         │         ┌───────────────┐         │
-         │         │               │         │
-         └─────────┤  Client Peer  │◄────────┘
-                   │               │    File Transfer
-                   └───────────────┘   (Direct P2P)
+
+## Architecture Diagrams
+
+The following diagrams summarize the actual implementation in `client.cpp` and `tracker.cpp`.
+
+### 1) Core Architecture Diagram
+- Shows the hybrid model: centralized control plane (tracker) and decentralized data plane (peer-to-peer file transfer).
+- Solid arrows represent synchronous request/response over TCP.
+
+### 2) File Download Lifecycle
+
+```mermaid
+sequenceDiagram
+autonumber
+participant U as User
+participant A as Client A
+participant T as Tracker
+participant B as Client B
+
+U->>A: download_file(groupId, fileName, savePath)
+A->>T: get_peer_info(groupId, fileName)
+T-->>A: ownerIP:ownerPort
+A->>B: connect + download(groupId, fileName)
+B->>T: get_file_path(groupId, fileName)
+T-->>B: file path
+B-->>A: file size
+A-->>B: ACK
+loop file transfer
+  B-->>A: file chunk (8KB)
+end
+A->>T: download_complete filename groupId
+T-->>A: status updated
+A-->>U: download complete
 ```
+
+- Captures the full request -> processing -> response path for downloads.
+- Highlights that actual file bytes never pass through the tracker.
+
+### 3) Runtime Data Structure View
+
+```mermaid
+erDiagram
+  USER ||--o{ GROUP_MEMBERSHIP : member_of
+  GROUP ||--o{ GROUP_MEMBERSHIP : contains
+  USER ||--o{ FILE_INFO : owns
+  FILE_INFO ||--o{ FILE_GROUP_MAP : shared_in
+  GROUP ||--o{ FILE_GROUP_MAP : has
+  USER ||--|| PEER_INFO : advertises
+  USER ||--o{ DOWNLOAD_STATUS : has
+```
+
+- Maps logical entities to in-memory structures managed by tracker and client runtime.
 
 ## Components
 
@@ -241,7 +305,18 @@ exit
 
 ## How It Works
 
-### User Authentication Flow
+This section combines the new Mermaid diagrams (architecture-level view) with the original step-by-step workflow diagrams (operational view).
+
+### End-to-End Summary
+
+1. User sends commands from the client CLI.
+2. Tracker handles metadata operations: authentication, groups, file listings, and peer discovery.
+3. For downloads, tracker returns owner peer endpoint (`IP:port`) instead of proxying file data.
+4. Requesting peer connects directly to owner peer and receives file chunks (`8KB` chunk size).
+5. Client updates download progress locally and notifies tracker when complete.
+6. Peer server runs in background thread to serve incoming download requests.
+
+### User Authentication Flow (Detailed)
 
 ```
 ┌──────────┐                                 ┌─────────┐
@@ -253,7 +328,7 @@ exit
 └──────────┘                                 └─────────┘
       │
       │ 3. If login successful:
-      │    - Start peer server 
+      │    - Start peer server
       │    - Register peer (IP:port)
       ▼
 ┌─────────────────┐
@@ -264,14 +339,14 @@ exit
 └─────────────────┘
 ```
 
-### File Transfer Process
+### File Transfer Process (Detailed)
 
-1. **Request:** Client requests a file from a specific group
-2. **Verification:** Tracker checks group membership and file existence
-3. **Discovery:** Tracker provides IP and port of the peer with the file
-4. **Connection:** Requesting client connects directly to the file owner
-5. **Transfer:** File is sent in 8KB chunks with progress tracking
-6. **Completion:** Download status is updated when finished
+1. **Request:** Client requests a file from a specific group.
+2. **Verification:** Tracker checks group membership and file availability.
+3. **Discovery:** Tracker returns IP and port of the owner peer.
+4. **Connection:** Requesting client connects directly to owner peer.
+5. **Transfer:** File is sent in `8KB` chunks with progress tracking.
+6. **Completion:** Client reports completion to tracker.
 
 ```
 ┌──────────┐    1. File Request    ┌─────────┐
@@ -283,14 +358,14 @@ exit
      │ 3. Direct Connection
      │
      ▼
-┌──────────┐    4. File Transfer   
+┌──────────┐    4. File Transfer
 │          │◄─────────────────────┐
-│ Client B │                      │ 
+│ Client B │                      │
 │          │                      │
 └──────────┘                      │
 ```
 
-### Group Management Process
+### Group Management Process (Detailed)
 
 ```
 ┌────────────┐                          ┌────────────┐
@@ -326,7 +401,7 @@ exit
 └────────────┘
 ```
 
-### Peer Server Operation
+### Peer Server Operation (Detailed)
 
 ```
 ┌─────────────────────────────────────────────────────┐
