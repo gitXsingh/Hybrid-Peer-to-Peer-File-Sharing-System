@@ -38,17 +38,17 @@ The system follows a hybrid architecture with centralized metadata management an
 ```mermaid
 flowchart LR
 subgraph CL["Client Layer"]
-  U["User (CLI)"]
+  U["User CLI"]
   CA["Client Peer A"]
-  CB["Client Peer B (Owner)"]
+  CB["Client Peer B - Owner"]
 end
 
 subgraph SL["Server Layer"]
-  T["Tracker Server\n(Auth + Groups + Metadata + Discovery)"]
+  T["Tracker Server - Auth + Groups + Metadata + Discovery"]
 end
 
 subgraph DL["Data Layer"]
-  M["In-memory Store\nusers/groups/files/peerInfo/downloads"]
+  M["In-memory Store - users/groups/files/peerInfo/downloads"]
 end
 
 U -->|Input command| CA
@@ -79,11 +79,11 @@ participant A as Client A
 participant T as Tracker
 participant B as Client B
 
-U->>A: download_file(groupId, fileName, savePath)
-A->>T: get_peer_info(groupId, fileName)
+U->>A: download_file groupId fileName savePath
+A->>T: get_peer_info groupId fileName
 T-->>A: ownerIP:ownerPort
-A->>B: connect + download(groupId, fileName)
-B->>T: get_file_path(groupId, fileName)
+A->>B: connect and download groupId fileName
+B->>T: get_file_path groupId fileName
 T-->>B: file path
 B-->>A: file size
 A-->>B: ACK

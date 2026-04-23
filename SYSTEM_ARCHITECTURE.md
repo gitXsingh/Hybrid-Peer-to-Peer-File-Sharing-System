@@ -97,7 +97,7 @@ W -.->|Store analytics/logs| NOSQL
 %% Peer discovery and direct data plane
 C1 -->|get_peer_info(groupId,fileName)| T1
 T1 -->|ownerUsername + ownerIP:ownerPort| C1
-C1 -->|TCP direct connect + "download groupId fileName"| C2
+C1 -->|TCP direct connect: download groupId fileName| C2
 C2 -->|File chunks (8KB stream)| C1
 
 %% Output delivery
@@ -126,12 +126,7 @@ class CACHE,MEMDB,SQL,NOSQL database;
 class NET,OBS,DNS external;
 class C1,T1,C2 critical;
 
-%% Interactive clickable nodes
-click C1 "client.cpp" "Client app: command loop, peer server, downloader"
-click T1 "tracker.cpp" "Tracker server: auth, groups, metadata, discovery"
-click MEMDB "tracker.cpp" "In-memory maps used as runtime data store"
-click U "README.md#available-commands" "CLI commands exposed to users"
-click DISC "README.md#file-transfer-process" "Peer discovery and transfer process"
+%% Click actions removed for GitHub parser compatibility
 ```
 
 ---
@@ -147,7 +142,7 @@ participant Tracker as Tracker API
 participant ClientB as Client Peer B (Owner)
 participant Store as Runtime Store (Maps)
 
-Note over User,ClientA: Entry point: user starts download_file <group_id> <file> <dest>
+Note over User,ClientA: Entry point: user starts download_file (group_id, file, dest)
 User->>ClientA: download_file(groupId, fileName, destinationPath)
 ClientA->>Tracker: get_peer_info groupId fileName (TCP sync)
 Tracker->>Store: validate member + resolve owner + endpoint
@@ -294,7 +289,8 @@ subgraph EX["External / Infra"]
 end
 
 U -->|CLI command| C1
-C1 -->|TCP request/response| LB --> T
+C1 -->|TCP request/response| LB
+LB -->|Route request| T
 T -->|Read/Write| MEM
 MEM -.->|Optional persistence| SQL
 C1 -->|get_peer_info| T
@@ -318,9 +314,7 @@ class LB,T,Q backend;
 class MEM,SQL database;
 class NET,OBS external;
 
-click C1 "client.cpp" "Client-side command and transfer logic"
-click T "tracker.cpp" "Tracker metadata and coordination logic"
-click MEM "tracker.cpp" "In-memory data structures"
+%% Click actions removed for GitHub parser compatibility
 ```
 
 ### 6.2 Download Lifecycle (Dark)
