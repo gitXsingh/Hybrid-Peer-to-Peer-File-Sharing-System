@@ -51,14 +51,14 @@ subgraph DL["Data Layer"]
   M["In-memory Store - users/groups/files/peerInfo/downloads"]
 end
 
-U -->|Input command| CA
-CA -->|TCP metadata request| T
-T -->|Metadata response| CA
-T -->|Read/Write state| M
-CA -->|Direct TCP download request| CB
-CB -->|File stream (8KB chunks)| CA
-CA -->|Progress + result| U
-CA -->|download_complete filename groupId| T
+U --> CA
+CA --> T
+T --> CA
+T --> M
+CA --> CB
+CB --> CA
+CA --> U
+CA --> T
 ```
 
 ## Architecture Diagrams
