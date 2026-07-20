@@ -212,13 +212,27 @@ void* clientHandlerThread(void* arg) {
     string clientIp(inet_ntoa(clientAddr.sin_addr));
     socketToIp[clientSock] = clientIp;
     
-    char buffer[BUFLEN];
+    char buffer[BUFLEN + 1];
     int recv_len;
 
     while ((recv_len = recv(clientSock, buffer, BUFLEN, 0)) > 0) {
         buffer[recv_len] = '\0';
         string input(buffer);
-        std::cout << "Received from client: " << input << std::endl;
+        // Sanitize: redact passwords from log output
+        string logInput = input;
+        size_t loginPos = logInput.find("login ");
+        if (loginPos == 0) {
+            size_t spaceAfterUser = logInput.find(' ', 6);
+            if (spaceAfterUser != string::npos)
+                logInput = logInput.substr(0, spaceAfterUser) + " ****";
+        }
+        size_t createUserPos = logInput.find("create_user ");
+        if (createUserPos == 0) {
+            size_t spaceAfterUser = logInput.find(' ', 12);
+            if (spaceAfterUser != string::npos)
+                logInput = logInput.substr(0, spaceAfterUser) + " ****";
+        }
+        std::cout << "Received from client: " << logInput << std::endl;
 
         string command;
         vector<string> args;

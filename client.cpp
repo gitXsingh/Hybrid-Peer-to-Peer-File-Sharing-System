@@ -6,6 +6,7 @@
 #include <string>
 #include <fstream>
 #include <algorithm> // For std::min
+#include <atomic>    // For std::atomic<bool>
 #include <cstring>   // For strlen, strcpy
 
 #ifdef _WIN32
@@ -117,7 +118,7 @@ SOCKET trackerSock;
 bool loggedIn = false;
 std::string currentUser;
 int clientPort = 9000; // Default port for listening to peer connections
-bool serverRunning = false;
+std::atomic<bool> serverRunning{false};
 pthread_t serverThreadId;
 pthread_mutex_t downloadLock; // Linux synchronization mechanism
 
@@ -184,7 +185,7 @@ void* downloadThreadFunc(void* arg) {
 // Send message to tracker and get response
 std::string sendToTrackerAndGetResponse(const std::string &message) {
     send(trackerSock, message.c_str(), message.length(), 0);
-    char buffer[BUFLEN];
+    char buffer[BUFLEN + 1];
     int recv_len = recv(trackerSock, buffer, BUFLEN, 0);
     if (recv_len > 0) {
         buffer[recv_len] = '\0';
@@ -280,7 +281,7 @@ bool sendFile(const std::string& filePath, SOCKET peerSock) {
 bool receiveFile(const std::string& savePath, SOCKET peerSock, const std::string& filename, const std::string& groupId) {
     try {
         // Receive file size
-        char sizeBuffer[BUFLEN];
+        char sizeBuffer[BUFLEN + 1];
         int recv_len = recv(peerSock, sizeBuffer, BUFLEN, 0);
         if (recv_len <= 0) {
             std::cerr << "Error receiving file size" << std::endl;
@@ -354,7 +355,7 @@ bool receiveFile(const std::string& savePath, SOCKET peerSock, const std::string
         std::cout << "Download complete" << std::endl;
         
         // Notify tracker about download completion
-        std::string completionMsg = "download_complete " + filename + " " + groupId;
+        std::string completionMsg = "download_complete " + groupId + " " + filename;
         std::string response = sendToTrackerAndGetResponse(completionMsg);
         std::cout << "Download notification: " << response << std::endl;
         
@@ -456,7 +457,7 @@ void* handleClient(void* arg) {
     SOCKET sock = *sock_ptr;
     delete sock_ptr;
     
-    char buffer[BUFLEN];
+    char buffer[BUFLEN + 1];
     int len = recv(sock, buffer, BUFLEN, 0);
     if (len > 0) {
         buffer[len] = '\0';
